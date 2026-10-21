@@ -72,10 +72,10 @@ CONTAINER_NAME=online-poker HOST_PORT=3000 BIND_ADDRESS=0.0.0.0 docker compose u
 
 ## Deployment auf einem VPS mit `deploy.sh`
 
-Klone das Repository auf dem Server und starte das Skript:
+Das Repository ist **privat**. GitHub akzeptiert für `git clone` und `git pull` kein Passwort, deshalb braucht der Server einen eigenen Zugang (siehe [Zugriff auf das private Repository](#zugriff-auf-das-private-repository)). Mit eingerichtetem Deploy-Key klonst du so:
 
 ```bash
-git clone <Repository-URL>
+git clone git@github-online-poker:DasKINIJI/Online_Poker.git
 cd Online_Poker
 ./deploy.sh
 ```
@@ -91,12 +91,61 @@ Das Skript startet nichts ohne Rückfrage. Es erklärt vor jeder Änderung, was 
 5. **Konfiguration schreiben.** Das betrifft `deploy.env` und bei Bedarf `docker-compose.override.yml`. Gibt es eine `.env.example`, fragt das Skript, ob eine `.env` erstellt werden soll, und fragt jeden Wert einzeln ab.
 6. **Container bauen und starten.** Danach wartet das Skript, bis der Healthcheck „healthy“ meldet.
 7. **Caddy einrichten.**
-   - *Bei vorhandenem Caddy:* Das Skript legt ein Backup der Caddyfile an und zeigt den geplanten `reverse_proxy`-Block. Erst nach deiner Bestätigung trägt es ihn ein oder legt ihn als separate Datei unter `caddy/` ab. Anschließend prüft es die Konfiguration mit `caddy validate`. **Caddy wird nicht automatisch neu geladen.** Das Skript nennt dir den passenden Befehl, also `sudo systemctl reload caddy` oder `docker exec <caddy> caddy reload …`.
+   - *Bei vorhandenem Caddy:* Das Skript legt ein Backup der Caddyfile an und zeigt den geplanten `reverse_proxy`-Block. Erst nach deiner Bestätigung trägt es ihn ein oder legt ihn als separate Datei unter `caddy/` ab. Anschließend prüft es die Konfiguration mit `caddy validate`. **Caddy wird nicht automatisch neu geladen.** Das Skript nennt dir den passenden Befehl, also `sudo systemctl reload caddy` oder `docker exec caddy caddy reload …` (dabei `caddy` durch den Namen deines Caddy-Containers ersetzen).
    - *Bei neu installiertem Caddy:* Das Skript schreibt die Caddyfile (die Standarddatei wird vorher gesichert), validiert sie und aktiviert den Dienst. Danach fragt es, ob die Ports 80/443 in ufw oder firewalld freigegeben werden sollen, und weist auf den nötigen DNS-Eintrag hin.
 
 Am Ende gibt das Skript eine Zusammenfassung aus: URL, Port, Containername, Pfade, Backups und Volumes.
 
-Das Skript kann **mehrfach ausgeführt** werden. Frühere Antworten aus `deploy.env` erscheinen als Vorschlag. Ein von diesem Skript eingefügter Caddy-Block ist markiert (`# >>> deploy.sh: <name>`) und wird bei einem erneuten Lauf ersetzt statt doppelt eingetragen. Die Spielerdaten bleiben erhalten.
+Das Skript kann **mehrfach ausgeführt** werden. Frühere Antworten aus `deploy.env` erscheinen als Vorschlag. Ein von diesem Skript eingefügter Caddy-Block ist markiert (`# >>> deploy.sh: online-poker`) und wird bei einem erneuten Lauf ersetzt statt doppelt eingetragen. Die Spielerdaten bleiben erhalten.
+
+> Die Beispiele unten gehen vom Containernamen `online-poker` aus, dem Standardwert in `docker-compose.yml`, und von einem Klon unter `~/Online_Poker`. Hast du in `deploy.sh` einen anderen Containernamen gewählt, setze diesen ein. Die Volumes heißen dann `<dein-name>_poker-data` und `<dein-name>_poker-sounds`.
+
+## Zugriff auf das private Repository
+
+GitHub lehnt Passwörter für Git-Operationen ab. Die Fehlermeldung lautet dann *„Password authentication is not supported for Git operations“*. Auf dem Server gibt es zwei Wege.
+
+### Empfohlen: Deploy-Key per SSH (nur Lesezugriff, nur dieses Repository)
+
+1. Schlüssel auf dem Server erzeugen:
+
+   ```bash
+   ssh-keygen -t ed25519 -f ~/.ssh/online_poker_deploy -N "" -C "online-poker-vps"
+   cat ~/.ssh/online_poker_deploy.pub
+   ```
+
+2. Den ausgegebenen öffentlichen Schlüssel auf GitHub eintragen unter **https://github.com/DasKINIJI/Online_Poker/settings/keys** → *Add deploy key*. Die Option *Allow write access* bleibt aus.
+
+3. Auf dem Server einen SSH-Alias anlegen, damit Git genau diesen Schlüssel nutzt:
+
+   ```bash
+   cat >> ~/.ssh/config <<'EOF'
+   Host github-online-poker
+       HostName github.com
+       User git
+       IdentityFile ~/.ssh/online_poker_deploy
+       IdentitiesOnly yes
+   EOF
+   chmod 600 ~/.ssh/config
+   ssh -T github-online-poker      # Erwartet: "Hi DasKINIJI/Online_Poker! You've successfully authenticated…"
+   ```
+
+4. Klonen:
+
+   ```bash
+   cd ~
+   git clone git@github-online-poker:DasKINIJI/Online_Poker.git
+   ```
+
+   Hast du bereits per HTTPS geklont, stellst du den vorhandenen Klon um:
+
+   ```bash
+   cd ~/Online_Poker
+   git remote set-url origin git@github-online-poker:DasKINIJI/Online_Poker.git
+   ```
+
+### Alternative: Fine-grained Token
+
+Erstelle unter GitHub → *Settings → Developer settings → Fine-grained tokens* einen Token, der nur Zugriff auf `DasKINIJI/Online_Poker` hat, mit der Berechtigung **Contents: Read-only**. Beim `git clone https://github.com/DasKINIJI/Online_Poker.git` gibst du als Benutzernamen `DasKINIJI` ein und als Passwort **den Token**, nicht dein GitHub-Passwort. Ohne Credential-Helper fragt Git bei jedem `git pull` erneut.
 
 ## Konfiguration
 
@@ -118,7 +167,7 @@ Beim Start lädt der Server fehlende Sounddateien von `mirelo.ai` in den Ordner 
 ### Datensicherung
 
 ```bash
-docker run --rm -v <containername>_poker-data:/data -v "$PWD":/backup alpine \
+docker run --rm -v online-poker_poker-data:/data -v "$PWD":/backup alpine \
   tar czf /backup/poker-data-$(date +%F).tgz -C /data .
 ```
 
@@ -127,7 +176,7 @@ docker run --rm -v <containername>_poker-data:/data -v "$PWD":/backup alpine \
 Auf dem VPS:
 
 ```bash
-cd <Repository-Verzeichnis>
+cd ~/Online_Poker
 git pull
 ./deploy.sh
 ```
@@ -135,7 +184,7 @@ git pull
 Das Skript baut das Image neu und ersetzt den Container. Die Volumes bleiben dabei erhalten. Alternativ kannst du direkt im Installationsverzeichnis neu bauen:
 
 ```bash
-docker compose --project-name <containername> --env-file deploy.env up -d --build
+docker compose --project-name online-poker --env-file deploy.env up -d --build
 ```
 
 Hat `deploy.sh` eine `docker-compose.override.yml` angelegt, hänge `-f docker-compose.yml -f docker-compose.override.yml` an.
