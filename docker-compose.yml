@@ -1,0 +1,21 @@
+# Startet den Poker-Server als Container.
+# Werte kommen aus Umgebungsvariablen bzw. der von deploy.sh erzeugten deploy.env:
+#   CONTAINER_NAME  Name des Containers            (ohne Angabe: online-poker)
+#   HOST_PORT       Port auf dem Host              (ohne Angabe: 3000)
+#   BIND_ADDRESS    Host-Adresse für den Port      (ohne Angabe: 127.0.0.1 = nur lokal, z. B. für Caddy)
+services:
+  poker:
+    build: .
+    container_name: ${CONTAINER_NAME:-online-poker}
+    restart: unless-stopped
+    environment:
+      PORT: "3000"
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${HOST_PORT:-3000}:3000"
+    volumes:
+      - poker-data:/app/data
+      - poker-sounds:/app/sounds
+
+volumes:
+  poker-data:
+  poker-sounds:
