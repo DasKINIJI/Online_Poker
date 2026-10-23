@@ -2,6 +2,8 @@
 # Startet den Poker-Server und öffnet die WebApp im Browser.  Port ändern: PORT=4000 ./start.sh
 cd "$(dirname "$0")" || exit 1
 PORT="${PORT:-3000}"; URL="http://localhost:$PORT"
+# Discord-Webhook für den P/L-Export (geheim halten)
+export DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-https://discord.com/api/webhooks/1562855465858244659/zuZ-DHEwrxHKSRnQzIbiUZnJ7aHVnOBn4WqUzMNHFdgwcEk_2Zbnh9xC_i2C1BDQIQsA}"
 
 command -v node >/dev/null || { echo "Node.js fehlt – bitte installieren: https://nodejs.org"; exit 1; }
 [ -d node_modules/ws ] || { echo "Installiere Abhängigkeiten …"; npm install --no-audit --no-fund || exit 1; }

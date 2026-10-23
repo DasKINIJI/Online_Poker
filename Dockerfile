@@ -5,15 +5,16 @@ FROM node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production
 
-# Abhängigkeiten zuerst (besseres Layer-Caching). Einzige Abhängigkeit: ws.
-COPY package.json ./
-RUN npm install --omit=dev --no-audit --no-fund && npm cache clean --force
+# Abhängigkeiten zuerst (besseres Layer-Caching). Einzige Abhängigkeit: ws,
+# Version fest über package-lock.json.
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 
 # Nur die Dateien, die der Server zur Laufzeit braucht.
 COPY server.js index.html ./
 COPY cards ./cards
 
-# data/   -> Konto-Ledger (ledger.json), wird als Volume eingebunden
+# data/   -> Ledger (ledger.json) und hochgeladene Medien (data/md/), wird als Volume eingebunden
 # sounds/ -> beim Start geladene Sound-Dateien, wird als Volume eingebunden
 RUN mkdir -p data sounds && chown -R node:node /app
 USER node

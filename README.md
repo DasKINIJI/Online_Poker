@@ -2,6 +2,8 @@
 
 Ein selbst gehosteter **Texas-Hold'em-Pokertisch im Browser** für private Runden. Der Server ist in Node.js geschrieben und verbindet alle Mitspieler per WebSocket in Echtzeit. Die gesamte Oberfläche steckt in einer einzigen `index.html`. Die Hole Cards eines Spielers schickt der Server nur an diesen Spieler. Für alle sichtbar werden sie erst beim Showdown oder bei der 7-2-Aufdeckung.
 
+> Das Repository enthält **keine Spielerdaten**. Eine neue Installation startet mit leerer Spielerliste, leerem Archiv und ohne Profilbilder.
+
 > Die App hat **keine Anmeldung und kein Passwort**. Wer die URL kennt, kann zusehen, einen Namen aus der Spielerliste wählen und neue Namen anlegen. Gib die Adresse deshalb nur an Mitspieler weiter oder schütze sie zusätzlich, zum Beispiel per Basic-Auth in Caddy.
 
 ## Funktionen
@@ -14,21 +16,28 @@ Ein selbst gehosteter **Texas-Hold'em-Pokertisch im Browser** für private Runde
 - *Sweat*: All-in-Spieler decken ihre Karte selbst langsam auf, per Maus oder Wischen.
 - *Rabbit Hunt*: Nach der Hand lassen sich die nicht ausgeteilten Board-Karten ansehen.
 - Optionale Hausregeln, live umschaltbar: die 7-2-Regel und *The Train* (3 Hände in Folge), jeweils mit einem Betrag pro Spieler.
-- *Call Clock*: Braucht ein Spieler länger als 2 Minuten, können die anderen ihm 60 Sekunden geben. Danach wird automatisch gefoldet.
+- *Call Clock*: Ist ein Spieler 90 Sekunden inaktiv, kann ein Mitspieler die Uhr auslösen. Danach bleiben 60 Sekunden, sonst wird gefoldet.
+- *Bereit-Runde*: Vor der ersten Hand und nach einer Pause startet die Hand erst, wenn alle bereit sind oder ein bereiter Spieler „Trotzdem starten“ drückt. Wer nicht bereit ist, setzt aus.
 - Aussetzen, Pleite-Pause (ab 3 Spielern bleiben 30 Sekunden für Rebuy oder Aussetzen) und Emotes.
+- *Reconnect*: Bricht die Verbindung ab, bleiben Platz und Stack erhalten. Derselbe Browser verbindet sich wieder, und ein anderes Gerät kann den Platz übernehmen.
+- *Kill-Sounds*: Wer einen Mitspieler aus der Hand ausschaltet, löst seinen Kill-Sound #1–#5 aus. Gezählt wird pro Sitzung am Tisch.
 
 **Kasse und Daten**
 - Eine dauerhafte Spielerliste mit Hauptnamen. Am Tisch lässt sich zusätzlich ein Nickname anzeigen.
 - Buy-in, Rebuy (40 BB bis zum größten Stack am Tisch), Abzug als Korrektur und Cashout. Jede Buchung wird festgehalten.
 - Eine Transaktionsübersicht der laufenden Session und ein Session-Archiv der abgeschlossenen Sessions.
+- Beim Schließen einer Session entscheidet ein Teilnehmer, ob die Gewinne und Verluste per Discord-Webhook ins Dashboard gehen oder ob es eine „Spaßrunde“ ohne Übertragung war (siehe [Konfiguration](#konfiguration)).
+- Hauptnamen lassen sich mit einem Bestätigungswort löschen, aber nicht, solange der Spieler am Tisch sitzt. Historie und Gewinne/Verluste bleiben lesbar.
 - Eine Handhistorie mit den letzten Händen.
-- Profilbilder als kleine JPEGs, gespeichert pro Hauptname.
-- Alles wird in `data/ledger.json` gespeichert. Die Datei wird atomar über eine temporäre Datei und Umbenennen geschrieben.
+- Profilbilder pro Hauptname, als kleines JPEG oder als GIF.
+- Eigene Sounds pro Hauptname: Sieges-Musik (spielt ab 50 BB im Hauptpot) und bis zu fünf Kill-Sounds, jeweils als MP3 oder WAV mit höchstens 1 MB und 6 Sekunden Spielzeit.
+- Konten, Archiv und Profilbilder liegen in `data/ledger.json`, hochgeladene Medien in `data/md/`. Das Ledger wird atomar über eine temporäre Datei und Umbenennen geschrieben.
 
 **Darstellung**
 - Mehrere Kartendesigns: zwei- und vierfarbig aus den SVG-Vorlagen, dazu vollfarbig und Gold, die der Server daraus erzeugt. Rück- und Vorderseite sind anpassbar.
 - Tischfarben Grün, Blau, Rot und Anthrazit.
 - Soundeffekte (siehe [Sounds](#sounds)). Fehlt eine Datei, erzeugt der Browser den Klang synthetisch.
+- Installierbar als App (PWA) mit Manifest, App-Icon und Service Worker. Karten und Sounds werden zwischengespeichert, die Seite selbst lädt immer zuerst aus dem Netz. Updates kommen also mit dem nächsten Neuladen an.
 
 ## Voraussetzungen
 
@@ -152,17 +161,34 @@ Erstelle unter GitHub → *Settings → Developer settings → Fine-grained toke
 | Was | Wert | Hinweis |
 |---|---|---|
 | Umgebungsvariable `PORT` | Standard `3000` | Port, auf dem `server.js` lauscht. Im Container fest auf 3000 gesetzt. |
+| Umgebungsvariable `DISCORD_WEBHOOK` | leer | Discord-Webhook-URL für den Gewinn-/Verlust-Export einer Session. Leer bedeutet kein Export. **Geheim halten.** |
 | `CONTAINER_NAME` | Standard `online-poker` | Compose-Variable, wird von `deploy.sh` gesetzt |
 | `HOST_PORT` | Standard `3000` | Compose-Variable, Port auf dem Host |
 | `BIND_ADDRESS` | Standard `127.0.0.1` | Compose-Variable, Host-Adresse für den Port |
-| Volume `poker-data` → `/app/data` | `ledger.json` | Spielerliste, Transaktionen, Archiv und Profilbilder. **Sichern!** |
+| Volume `poker-data` → `/app/data` | `ledger.json`, `md/` | Spielerliste, Transaktionen, Archiv, Profilbilder und hochgeladene Medien. **Sichern!** |
 | Volume `poker-sounds` → `/app/sounds` | `*.mp3` | Beim Start geladene Sounddateien |
 
 Weitere Umgebungsvariablen nutzt die App nicht.
 
+### Discord-Webhook einrichten
+
+Die Vorlage `.env.example` enthält `DISCORD_WEBHOOK`. Beim nächsten Lauf fragt `./deploy.sh`, ob daraus eine `.env` erstellt werden soll. Die Datei bekommt die Rechte 600, und `deploy.sh` bindet sie über `docker-compose.override.yml` in den Container ein. Die Daten bleiben dabei erhalten. Die `.env` gehört nicht ins Repository.
+
+Lokal ohne Docker reicht: `DISCORD_WEBHOOK=https://discord.com/api/webhooks/… npm start`.
+
 ### Sounds
 
 Beim Start lädt der Server fehlende Sounddateien von `mirelo.ai` in den Ordner `sounds/`. Laut Kommentar im Code **laufen diese Download-Links am 27.10.2026 ab**. Wurden die Dateien bis dahin nicht geladen, erzeugt der Browser die Klänge synthetisch. Bereits geladene Dateien bleiben im Volume erhalten.
+
+### Was bleibt bei Updates und Neustarts erhalten?
+
+| Bleibt erhalten (Volumes) | Geht bei einem Neustart des Containers verloren (Arbeitsspeicher) |
+|---|---|
+| Spielerliste, Konten, Buchungen, Session-Archiv, Profilbilder, eigene Sounds, geladene Sounddateien | der laufende Tisch: Sitzplätze, aktuelle Stacks und die Handhistorie der laufenden Sitzung |
+
+Deshalb schließt man vor einem vollständigen Update am besten die laufende Session in der App. `update.sh` warnt, wenn noch eine offen ist. Ein reines Oberflächen-Update (`index.html`) braucht keinen Neustart.
+
+> Die Volumes sind an den **Containernamen** gebunden (`<name>_poker-data`). Wählst du in `deploy.sh` einen anderen Namen, startet die App mit neuen, leeren Volumes. Die alten Daten liegen dann unbenutzt im alten Volume. `deploy.sh` warnt in diesem Fall.
 
 ### Datensicherung
 
@@ -171,17 +197,49 @@ docker run --rm -v online-poker_poker-data:/data -v "$PWD":/backup alpine \
   tar czf /backup/poker-data-$(date +%F).tgz -C /data .
 ```
 
+### Backup wiederherstellen
+
+`update.sh` legt vor jedem vollständigen Update unter `backups/` im Installationsverzeichnis ein Backup an. So spielst du es zurück:
+
+```bash
+docker stop online-poker
+docker run --rm -v online-poker_poker-data:/data -v "$PWD/backups":/b alpine \
+  sh -c 'rm -rf /data/* && tar -xf /b/poker-data-JJJJMMTT-HHMMSS.tar -C /data --strip-components=1'
+docker start online-poker
+```
+
+### Installation leeren (Neuanfang)
+
+Damit löschst du **alle** Spielerdaten unwiderruflich. Lege vorher ein Backup an.
+
+```bash
+docker stop online-poker
+docker run --rm -v online-poker_poker-data:/data alpine sh -c 'rm -rf /data/*'
+docker start online-poker
+```
+
 ## Aktualisieren
 
-Auf dem VPS:
+Auf dem VPS im Repository:
 
 ```bash
 cd ~/Online_Poker
-git pull
-./deploy.sh
+./update.sh
 ```
 
-Das Skript baut das Image neu und ersetzt den Container. Die Volumes bleiben dabei erhalten. Alternativ kannst du direkt im Installationsverzeichnis neu bauen:
+`update.sh` arbeitet in fünf Schritten und fragt vor jeder Änderung nach:
+
+1. Es findet die Installation über die `deploy.env` und prüft, ob der Container läuft.
+2. Auf Wunsch holt es neue Commits von GitHub. Vor dem `git pull --ff-only` zeigt es die Commits und die geänderten Dateien an.
+3. Es vergleicht die Dateien im Repository per Prüfsumme mit denen im **laufenden Container**.
+4. Danach wählt es den passenden Weg:
+   - **Nur `index.html` geändert:** Die Datei wird per `docker cp` live in den Container gelegt. Es gibt **keinen Neustart**, der Tisch läuft weiter. Der Server liest `index.html` bei jedem Aufruf neu, die Spieler laden die Seite einfach neu.
+   - **Server-Dateien geändert** (`server.js`, `package*.json`, `cards/`, `Dockerfile`, `docker-compose.yml`): Das Skript warnt bei offener Session, sichert `data/` nach `backups/poker-data-<Zeitstempel>.tar` (Rechte 600), baut das Image neu und ersetzt den Container. Die Volumes bleiben dieselben.
+5. Es wartet auf den Healthcheck und gibt eine Zusammenfassung aus.
+
+Neue Konfigurationsoptionen, zum Beispiel ein Discord-Webhook, richtest du mit `./deploy.sh` ein. Ein erneuter Lauf ist gefahrlos, die Daten bleiben erhalten.
+
+Ohne Skript geht ein vollständiges Update im Installationsverzeichnis so:
 
 ```bash
 docker compose --project-name online-poker --env-file deploy.env up -d --build
@@ -196,8 +254,11 @@ server.js            HTTP- und WebSocket-Server, Spiellogik, Ledger
 index.html           komplette Browser-Oberfläche
 cards/2color, 4color SVG-Kartenvorlagen
 selftest.js          Selbsttest (npm test)
+package-lock.json    feste Version der Abhängigkeit ws
+.env.example         Vorlage für Umgebungsvariablen (DISCORD_WEBHOOK)
 start.sh, start.bat  lokaler Start mit Browser-Öffnung
 Dockerfile           Image auf Basis von node:22-alpine
 docker-compose.yml   Container, Port-Bindung, Volumes
 deploy.sh            interaktives VPS-Deployment mit Caddy
+update.sh            Update ohne Datenverlust (Live-Tausch oder Neubau mit Backup)
 ```
