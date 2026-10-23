@@ -4,6 +4,8 @@ rem Anderer Port: in der Eingabeaufforderung "set PORT=4000" eingeben, dann star
 cd /d "%~dp0"
 if not defined PORT set PORT=3000
 set URL=http://localhost:%PORT%
+rem Discord-Webhook fuer den P/L-Export (geheim halten)
+if not defined DISCORD_WEBHOOK set DISCORD_WEBHOOK=https://discord.com/api/webhooks/1562855465858244659/zuZ-DHEwrxHKSRnQzIbiUZnJ7aHVnOBn4WqUzMNHFdgwcEk_2Zbnh9xC_i2C1BDQIQsA
 
 where node >nul 2>nul
 if errorlevel 1 (

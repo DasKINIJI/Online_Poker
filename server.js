@@ -1,7 +1,7 @@
 // Start: npm install ws && node server.js  ->  http://localhost:3000
 // Alle Beträge intern in Cent (ganzzahlig, 5er-Schritte). Hole Cards verlassen den Server nur an ihren Besitzer
 // (oder bei Showdown / 7-2-Aufdeckung an alle).
-const http = require('http'), fs = require('fs'), cr = require('crypto'), { WebSocketServer } = require('ws');
+const http = require('http'), fs = require('fs'), cr = require('crypto'), zlib = require('zlib'), { WebSocketServer } = require('ws');
 const srv = http.createServer((q, r) => {
   const cm = q.url.match(/^\/cards\/([24]color|full|gold)\/([2-9TJQKA])([SHDC])\.svg$/); // nur diese 208 Karten, kein Pfad-Trick möglich
   if (cm) return fs.readFile(`${__dirname}/cards/${{ full: '4color', gold: '2color' }[cm[1]] || cm[1]}/${cm[2]}${cm[3]}.svg`, 'utf8', (e, d) => { if (e) { r.writeHead(404); return r.end(); } r.writeHead(200, { 'content-type': 'image/svg+xml', 'cache-control': 'max-age=86400' }); r.end(deckSvg(cm[1], cm[3], d)); });
@@ -9,6 +9,9 @@ const srv = http.createServer((q, r) => {
   if (sm) return fs.readFile(`${__dirname}/sounds/${sm[1]}.mp3`, (e, d) => { if (e) { r.writeHead(404); return r.end(); } r.writeHead(200, { 'content-type': 'audio/mpeg', 'cache-control': 'max-age=86400' }); r.end(d); });
   const am = q.url.match(/^\/av\/(\d+)\.jpg(\?v=\d+)?$/), a = am && L.av[am[1]]; // Profilbild pro Hauptname, Version im Link -> darf lange gecacht werden
   if (am) { if (!a) { r.writeHead(404); return r.end(); } r.writeHead(200, { 'content-type': 'image/jpeg', 'cache-control': 'max-age=31536000, immutable' }); return r.end(Buffer.from(a.d, 'base64')); }
+  const mm = q.url.match(/^\/md\/(\d+)\/(av|w|k[0-4])(\?v=\d+)?$/), mx = mm && (L.md[mm[1]] || {})[mm[2]]; // GIF-Profilbild, Sieges-Musik, Kill-Sounds
+  if (mm) return mx ? fs.readFile(`${MDIR}/${mm[1]}-${mm[2]}`, (e, d) => { if (e) { r.writeHead(404); return r.end(); } r.writeHead(200, { 'content-type': mx.m, 'cache-control': 'max-age=31536000, immutable' }); r.end(d); }) : (r.writeHead(404), r.end());
+  const pw = PWA[q.url.split('?')[0]]; if (pw) { r.writeHead(200, { 'content-type': pw[0], 'cache-control': pw[2] || 'max-age=86400' }); return r.end(pw[1]); } // PWA: Manifest, Service Worker, Icons
   r.writeHead(200, { 'content-type': 'text/html;charset=utf-8' }); r.end(fs.readFileSync(__dirname + '/index.html')); });
 // Vorderseite 3 (vollfarbig) und 4 (Gold) aus den Vektor-Vorlagen ableiten: nur Kartengrund + Index/Pips umfärben, Bildkarten-Porträts bleiben
 const FB = { S: '#2b2b30', H: '#c8202c', D: '#1f5fc4', C: '#1f8a3b' };
@@ -18,15 +21,45 @@ const wss = new WebSocketServer({ server: srv });
 // Dauerhaftes Konto-Ledger: uid -> Hauptname (Spielerliste beim Buy-in), alle Transaktionen. Kaputte Datei -> Abbruch statt Überschreiben.
 const LF = __dirname + '/data/ledger.json';
 const L = fs.existsSync(LF) ? JSON.parse(fs.readFileSync(LF, 'utf8')) : { un: 0, nm: {}, pid: {}, tx: [] };
-L.ss = L.ss || []; L.av = L.av || {}; // L.av: uid -> { d: JPEG base64, v: Version }
- // abgehakte Sessions (Transaktions-Archiv); L.tx = laufende Session
+L.ss = L.ss || []; L.av = L.av || {}; L.dn = L.dn || {}; L.md = L.md || {}; // L.dn: uid -> Name gelöschter Hauptnamen (Historie/P&L bleiben lesbar) // L.av: uid -> { d: JPEG base64, v: Version } // L.md: uid -> { Slot: { v, m: MIME } }, Dateien in data/md
+delete L.du; delete L.tk; // Reste des entfernten Discord-Logins (Konten-Verknüpfung + Login-Tokens) – beim nächsten Speichern weg
+const MDIR = __dirname + '/data/md'; fs.mkdirSync(MDIR, { recursive: true });
+const HOOK = process.env.DISCORD_WEBHOOK; // P/L-Export einer Session in einen Discord-Channel
+async function hook(x) { // P/L einer Session in den Discord-Channel (Dashboard) posten
+  const P = {}, e = v => (v > 0 ? '+' : '') + (v / 100).toFixed(2).replace('.', ',') + ' €';
+  x.tx.forEach(t => { const p = P[t.uid] ??= { i: 0, o: 0, n: nm(t.uid) }; if (/^(Buy|Rebuy)/.test(t.type)) p.i += t.amt; else if (t.type == 'Auszahlung') p.o += t.amt; else if (t.type == 'Abzug') p.i -= t.amt; });
+  const l = Object.values(P).map(p => `${p.n}: **${e(p.o - p.i)}** (Buy-in ${e(p.i).replace('+', '')})`);
+  const r = await fetch(HOOK, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content: `**Session #${x.id}** · ${new Date(x.a).toLocaleString('de-DE')} – ${new Date(x.e).toLocaleTimeString('de-DE')}\n` + l.join('\n'), allowed_mentions: { parse: [] } }) });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+}
+const mtype = b => { const h = b.subarray(0, 4).toString('latin1'); return h == 'GIF8' ? 'image/gif' : h == 'RIFF' && b.subarray(8, 12).toString('latin1') == 'WAVE' ? 'audio/wav' : h.startsWith('ID3') || (b[0] == 0xff && (b[1] & 0xe0) == 0xe0) ? 'audio/mpeg' : null; }; // Inhalt prüfen, nicht die Endung
+// PWA ohne Extra-Dateien: Manifest, Service Worker (App-Shell + Karten/Sounds cachen, Seite immer zuerst vom Netz) und Icons
+const png = n => { // App-Icon: goldenes Pik auf dunklem Grund, einmal gerastert (zlib ist eingebaut)
+  const raw = Buffer.alloc((n * 4 + 1) * n);
+  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+    const u = (x + .5) / n * 2 - 1, v = (y + .5) / n * 2 - 1, hx = u / .5, hy = (v + .12) / .5, a = hx * hx + hy * hy - 1; // Herz-Kurve auf dem Kopf = Pik
+    const on = a * a * a - hx * hx * hy * hy * hy <= 0 || (v > .3 && v < .72 && Math.abs(u) < (v - .3) * .5 + .04), o = (y * (n * 4 + 1)) + 1 + x * 4;
+    raw.set(on ? [245, 200, 66, 255] : [20, 16, 22, 255], o);
+  }
+  const ch = (t, d) => { const l = Buffer.alloc(4), c = Buffer.alloc(4), td = Buffer.concat([Buffer.from(t), d]); l.writeUInt32BE(d.length); c.writeUInt32BE(zlib.crc32(td)); return Buffer.concat([l, td, c]); };
+  const ih = Buffer.alloc(13); ih.writeUInt32BE(n, 0); ih.writeUInt32BE(n, 4); ih[8] = 8; ih[9] = 6; // 8 Bit RGBA
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), ch('IHDR', ih), ch('IDAT', zlib.deflateSync(raw)), ch('IEND', Buffer.alloc(0))]);
+};
+const SW = `const C='poker-v1';
+self.addEventListener('install',e=>{e.waitUntil(caches.open(C).then(c=>c.addAll(['/','/manifest.json','/icon-192.png'])));self.skipWaiting()});
+self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(x=>x!=C).map(x=>caches.delete(x)))));self.clients.claim()});
+self.addEventListener('fetch',e=>{const q=e.request,u=new URL(q.url);if(q.method!='GET'||u.origin!=location.origin)return;
+ if(/^\\/(cards|sounds|md|av)\\//.test(u.pathname))e.respondWith(caches.match(q).then(r=>r||fetch(q).then(n=>{if(n.ok){const k=n.clone();caches.open(C).then(c=>c.put(q,k))}return n})));
+ else e.respondWith(fetch(q).then(n=>{if(n.ok&&u.pathname=='/'){const k=n.clone();caches.open(C).then(c=>c.put('/',k))}return n}).catch(()=>caches.match(q).then(r=>r||caches.match('/'))))});`;
+const PWA = { '/sw.js': ['text/javascript', SW, 'no-cache'], '/icon-192.png': ['image/png', png(192)], '/icon-512.png': ['image/png', png(512)], '/icon-180.png': ['image/png', png(180)],
+  '/manifest.json': ['application/manifest+json', JSON.stringify({ name: 'Poker Live', short_name: 'Poker', start_url: '/', scope: '/', display: 'standalone', background_color: '#0c0709', theme_color: '#0c0709', icons: [192, 512].map(s => ({ src: `/icon-${s}.png`, sizes: `${s}x${s}`, type: 'image/png', purpose: 'any maskable' })) })] };
 const save = () => { L.un = T.un; fs.mkdirSync(__dirname + '/data', { recursive: true }); fs.writeFileSync(LF + '.tmp', JSON.stringify(L)); fs.renameSync(LF + '.tmp', LF); }; // tmp+rename: nie halb geschrieben
 // Mirelo-SFX (einmalig generiert). Fehlende Dateien werden beim Start nach sounds/ geladen. Austeilen + „Du bist dran“ synthetisiert der Browser selbst.
 // shortcut: Download-Links laufen am 27.10.2026 ab – danach greift im Browser die Web-Audio-Synthese.
 const SFX = { flip: 'qx7d8551j8zz21ne84e39m4x6d8gn65p/0?k=Xge575WH3qPDcooK', fold: 'qx74prcarp7rg37w0fts2xh5xs8gn57h/0?k=UnoW6Lvi5gdueNLt', check: 'qx7aez90hd3bz1gng6s90kpzax8gm7mx/0?k=o2cDszAyoZNjUDYP', chips: 'qx75hnsqzw3n1tj73f4fxx0r0d8gmh9e/0?k=KUegyT0HjEr2irk1', raise: 'qx73jbdj4n8xtvk440htnbe2md8gn93p/0?k=v5x7NR9V97L1DlCG', allin: 'qx75her6crhymhh2fm2037p7w58gm95y/0?k=CLz4g8WClITJN5nZ', pot: 'qx7420rdkkm0y8q39xkfa91yr18gm7f7/0?k=PPC4uhhknK3Mxvn3', tick: 'qx7dnjzhbfv5bdkqn8tdnrnfq18gnmht/0?k=DyS-vyeXKV3G8cM0' };
 fs.mkdirSync(__dirname + '/sounds', { recursive: true });
 for (const [k, u] of Object.entries(SFX)) { const f = `${__dirname}/sounds/${k}.mp3`; if (!fs.existsSync(f)) fetch('https://mirelo.ai/dl/' + u).then(r => r.ok ? r.arrayBuffer() : Promise.reject('HTTP ' + r.status)).then(b => fs.writeFileSync(f, Buffer.from(b))).catch(e => console.log('Sound ' + k + ' nicht geladen (' + e + ') – Browser nutzt Synthese')); }
-const T = { nm: L.nm, bp: null, pl: [], bb: 10, seven: 0, board: [], deck: [], btn: -1, live: 0, cur: 0, last: 0, turn: -1, msg: 'Warte auf Spieler …', timer: 0, sd: 0, vt: 0, ts: 0, clk: 0, ck: 0, eq: null, run: 0, rb: [], rab: null, agg: -1, ag: -1, sp: new Set(), bs: -1, hn: 0, un: L.un, arch: [], H: null, sw: null, tx: L.tx, lock: 0, sdp: 0, sdt: 0, sx: null, ro: 0 };
+const T = { nm: L.nm, bp: null, pl: [], bb: 10, seven: 0, board: [], deck: [], btn: -1, live: 0, cur: 0, last: 0, turn: -1, msg: 'Warte auf Spieler …', timer: 0, sd: 0, vt: 0, ts: 0, clk: 0, ck: 0, eq: null, run: 0, rb: [], rab: null, agg: -1, ag: -1, sp: new Set(), bs: -1, hn: 0, un: L.un, arch: [], H: null, sw: null, tx: L.tx, lock: 0, sdp: 0, sdt: 0, sx: null, ro: 0, rd: 1, go: 0 };
 const HN = ['High Card', 'Paar', 'Zwei Paare', 'Drilling', 'Straße', 'Flush', 'Full House', 'Vierling', 'Straight Flush'];
 const sh = () => { const d = [...Array(52).keys()]; for (let i = 51; i > 0; i--) { const j = cr.randomInt(i + 1);[d[i], d[j]] = [d[j], d[i]]; } return d; };
 
@@ -42,26 +75,31 @@ const best = c => { let b = 0; const rec = (st, a) => { if (a.length == 5) { b =
 
 const send = (p, o) => p.ws.readyState == 1 && p.ws.send(JSON.stringify(o));
 const ev = o => T.pl.forEach(p => send(p, { t: 'e', ...o }));
-const nm = u => T.nm[u] || '?', tok = p => '\x01' + p.uid + '\x02', rn = t => String(t || '').replace(/\x01(\d+)\x02/g, (_, u) => nm(u)); // Namen erst beim Anzeigen einsetzen
+const nm = u => T.nm[u] || L.dn[u] || '?', tok = p => '\x01' + p.uid + '\x02', rn = t => String(t || '').replace(/\x01(\d+)\x02/g, (_, u) => nm(u)); // Namen erst beim Anzeigen einsetzen
 const pot = () => T.pl.reduce((a, q) => a + q.total, 0);
 const hid = me => T.sw && !T.sw.ok.has(me); // River für diesen Betrachter noch verdeckt (Sweat läuft)
 const mb = (b, me) => hid(me) && b.length == 5 ? [...b.slice(0, 4), -1] : b;
 const rbs = me => T.rb.map((b, r) => T.sw && r == T.sw.r ? mb(b, me) : b);
 const chips = q => q.stack + (T.live ? q.total : 0) + (q.add | 0); // total ist nach Handende schon verteilt
 const rbMax = p => Math.max(0, Math.max(...T.pl.map(chips)) - chips(p)); // Rebuy bis zum größten Stack
+const hcat = (q, me) => { if (!q.hole.length || q.folded) return -1; const c = [...q.hole, ...mb(T.board, me).filter(x => x >= 0)]; return c.length < 5 ? (c[0] % 13 == c[1] % 13 ? 1 : 0) : Math.floor(best(c) / 759375); }; // 0 High Card … 8 Straight Flush
 const net = q => (q.net || []).reduce((a, x) => a + x, 0); // Ergebnis der letzten 10 Hände
 const V = me => ({
-  t: 's', me, mp: Object.entries(T.nm).map(([u, n]) => ({ u: +u, n, b: T.pl.some(q => q.uid == u) ? 1 : 0, a: (L.av[u] || {}).v || 0 })), mn: me >= 0 ? T.nm[T.pl[me].uid] : '', hn: T.hn, bb: T.bb, live: T.live, board: mb(T.board, me), rbm: me >= 0 ? rbMax(T.pl[me]) : 0, s7n: T.sevenNext == null ? -1 : T.sevenNext, pot: T.pl.reduce((a, q) => a + q.total, 0), turn: T.turn, cur: T.cur,
-  min: T.cur + T.last, btn: T.btn, sd: T.sd, eq: T.eq, sdp: T.sdp ? T.sdp - Date.now() : 0, sdpEnd: T.sdp, sai: T.sdp && T.sx && T.sx.last >= 0 && T.pl[T.sx.last].allin ? 1 : 0, now: Date.now(), train: T.train | 0, trn: T.trainNext == null ? -1 : T.trainNext, sde: T.sdp ? T.pl.map((q, i) => i != T.sx.last && !q.folded && q.bet + q.stack > T.cur ? i : -1).filter(i => i >= 0) : [], sw: T.sw && T.sw.who.includes(me) && !T.sw.ok.has(me) ? { k: T.sw.ts, el: Date.now() - T.sw.ts, c: T.sw.c } : null, run: T.run, rb: rbs(me), rr: T.rr ? T.rr.map(rn) : null, rab: !T.live && T.rab ? T.rab.length : 0, vt: T.vt ? T.vt - Date.now() : 0, cl: T.clk ? T.clk - Date.now() : 0, el: T.ts ? Date.now() - T.ts : 0, msg: rn(T.msg), bp: T.bp ? { left: T.bp.until - Date.now(), who: T.bp.who.map(nm), me: me >= 0 && T.bp.who.includes(T.pl[me].uid) } : null, seven: T.seven,
-  pl: T.pl.map((q, i) => ({ u: q.uid, name: q.name, seat: q.seat, stack: q.stack, bet: q.bet, folded: q.folded, allin: q.allin, in: q.hole.length > 0, c: (i == me || q.show) ? q.hole : null, w: q.won, sh: q.show ? 1 : 0, stw: q.stw | 0, sg: (T.live ? q.stx : q.stw) | 0, vt: T.vt && !q.folded && q.hole.length ? q.v | 0 : -1, hot: (q.wst | 0) >= 3 || net(q) >= 40 * T.bb ? 1 : 0, cold: (q.lst | 0) >= 5 || net(q) <= -40 * T.bb ? 1 : 0, vp: q.hn ? Math.round((q.vn | 0) / q.hn * 100) : null, gh: q.ghost ? 1 : 0, bcall: q.bcall ? 1 : 0, out: q.out ? 1 : 0, so: q.so ? 1 : 0, tr: T.tr && T.tr.uid == q.uid ? T.tr.n : 0 }))
+  t: 's', me, mp: Object.entries(T.nm).map(([u, n]) => ({ u: +u, n, b: T.pl.some(q => q.uid == u) ? 1 : 0, a: (L.av[u] || {}).v || 0, m: Object.fromEntries(Object.entries(L.md[u] || {}).map(([s, x]) => [s, x.v])) })), mn: me >= 0 ? T.nm[T.pl[me].uid] : '', hn: T.hn, bb: T.bb, live: T.live, board: mb(T.board, me), rbm: me >= 0 ? rbMax(T.pl[me]) : 0, s7n: T.sevenNext == null ? -1 : T.sevenNext, pot: T.pl.reduce((a, q) => a + q.total - (T.live ? q.bet : 0), 0), turn: T.turn, cur: T.cur, // Pot ohne laufende Einsätze: die wandern erst am Rundenende hinein
+  min: Math.max(T.cur * 2, T.bb), ra: me >= 0 && !T.pl[me].acted ? 1 : 0, hs: me >= 0 ? hcat(T.pl[me], me) : -1, jm: T.pl.length ? Math.max(100 * T.bb, ...T.pl.map(chips)) : 0, btn: T.btn, sd: T.sd, eq: T.eq, sdp: T.sdp ? T.sdp - Date.now() : 0, sdpEnd: T.sdp, sai: T.sdp && T.sx && T.sx.last >= 0 && T.pl[T.sx.last].allin ? 1 : 0, now: Date.now(), train: T.train | 0, trn: T.trainNext == null ? -1 : T.trainNext, sde: T.sdp ? T.pl.map((q, i) => i != T.sx.last && !q.folded && q.bet + q.stack > T.cur ? i : -1).filter(i => i >= 0) : [], sw: T.sw && T.sw.who.includes(me) && !T.sw.ok.has(me) ? { k: T.sw.ts, el: Date.now() - T.sw.ts, c: T.sw.c } : null, run: T.run, rb: rbs(me), rr: T.rr ? T.rr.map(rn) : null, rab: !T.live && T.rab ? T.rab.length : 0, vt: T.vt ? T.vt - Date.now() : 0, cl: T.clk ? T.clk - Date.now() : 0, el: T.ts ? Date.now() - T.ts : 0, msg: rn(T.msg), bp: T.bp ? { left: T.bp.until - Date.now(), who: T.bp.who.map(nm), me: me >= 0 && T.bp.who.includes(T.pl[me].uid) } : null, seven: T.seven, rd: T.rd && !T.live ? 1 : 0,
+  pl: T.pl.map((q, i) => ({ rdy: q.rdy ? 1 : 0, u: q.uid, name: q.name, seat: q.seat, stack: q.stack, bet: q.bet, folded: q.folded, allin: q.allin, in: q.hole.length > 0, c: (i == me || q.show) ? q.hole : null, w: q.won, sh: q.show ? 1 : 0, stw: q.stw | 0, sg: (T.live ? q.stx : q.stw) | 0, vt: T.vt && !q.folded && q.hole.length ? q.v | 0 : -1, hot: (q.wst | 0) >= 3 || net(q) >= 40 * T.bb ? 1 : 0, cold: (q.lst | 0) >= 5 || net(q) <= -40 * T.bb ? 1 : 0, vp: q.hn ? Math.round((q.vn | 0) / q.hn * 100) : null, gh: q.ghost ? 1 : 0, bcall: q.bcall ? 1 : 0, out: q.out ? 1 : 0, so: q.so ? 1 : 0, tr: T.tr && T.tr.uid == q.uid ? T.tr.n : 0 }))
 });
-const endSess = () => { L.ss.push({ id: (L.ss.length ? L.ss[L.ss.length - 1].id : 0) + 1, a: T.tx[0].ts, e: Date.now(), tx: T.tx.splice(0) }); save(); }; // splice: T.tx bleibt dasselbe Array wie L.tx
+const endSess = () => { const x = { id: (L.ss.length ? L.ss[L.ss.length - 1].id : 0) + 1, a: T.tx[0].ts, e: Date.now(), tx: T.tx.splice(0), sx: 0 }; L.ss.push(x); save(); // splice: T.tx bleibt dasselbe Array wie L.tx
+  const us = new Set(x.tx.map(t => t.uid)); wss.clients.forEach(w => w.readyState == 1 && us.has(w.pu) && w.send(JSON.stringify({ t: 'e', k: 'ssq', id: x.id }))); }; // Teilnehmer fragen: Dashboard-Sync oder Spaßrunde (sx: 0 offen, 1 übertragen, 2 Spaßrunde)
 const bc = () => { if (!T.pl.length && T.tx.length) endSess(); // Tisch geschlossen oder leer -> Session abhaken (jeder Abgang läuft über bc)
   T.pl.forEach((p, me) => send(p, V(me))); T.sp.forEach(w => w.readyState == 1 && w.send(JSON.stringify(V(-1)))); };
 const nx = (i, f = p => !p.folded) => { for (let k = 1; k <= T.pl.length; k++) { const j = (i + k) % T.pl.length; if (f(T.pl[j])) return j; } return -1; };
 const post = (p, a) => { a = Math.min(a, p.stack); p.stack -= a; p.bet += a; p.total += a; if (!p.stack) p.allin = 1; };
 
 const tx = (p, type, amt) => { T.tx.push({ ts: Date.now(), name: p.name, uid: p.uid, type, amt }); save(); };
+const rebind = (q, ws) => { const o = q.ws; if (o !== ws) { o.P = null; if (o.readyState < 2) o.terminate(); } // altes Socket vergisst den Spieler -> sein close() tut nichts
+  q.ws = ws; ws.P = q; ws.pu = q.uid; T.sp.delete(ws); if (q.dso) { q.so = q.dso = 0; if (!T.live) q.ghost = 0; kick(); } send(q, { t: 'e', k: 'toast', m: 'Wieder verbunden – dein Platz ist erhalten.' }); bc(); };
+setInterval(() => wss.clients.forEach(w => { if (w.al === 0) return w.terminate(); w.al = 0; w.ping(); }), 25000); // Heartbeat: hält Proxys/Tunnel wach, tote Sockets fliegen nach ~50 s
 const kick = () => { if (!T.live && T.msg.startsWith('Warte')) { clearTimeout(T.timer); T.timer = setTimeout(start, 800); } };
 const payout = p => { const v = Math.max(0, p.stack + (p.add | 0) - (p.sub | 0)); if (v > 0) tx(p, 'Auszahlung', v); p.stack = p.add = p.sub = 0; }; // inkl. offener Rebuys/Korrekturen, nur einmal
 function cashout(p) { bpOk(p); payout(p); T.pl = T.pl.filter(q => q !== p); p.ws.P = null; T.sp.add(p.ws); bc(); }
@@ -70,7 +108,7 @@ function closeTable() { // Tisch schließen: laufende Hand abbrechen (Einsätze 
   if (T.H) { T.H.res = 'Abgebrochen – Tisch geschlossen'; T.H.win = []; T.H.total = pot(); T.H.board = T.board.slice(); T.H.boards = []; T.arch.push(T.H); T.H = null; }
   // Einsätze nur bei laufender Hand erstatten – nach Handende sind sie schon verteilt (sonst doppelte Auszahlung)
   T.pl.forEach(q => { if (T.live) q.stack += q.total; q.total = 0; payout(q); q.ws.P = null; T.sp.add(q.ws); });
-  T.pl = []; T.live = 0; T.turn = -1; T.board = []; T.rb = []; T.rr = null; T.eq = null; T.sw = null; T.vt = 0; T.clk = 0; T.btn = -1; T.bs = -1; T.msg = 'Tisch geschlossen'; T.bp = null; bc();
+  T.pl = []; T.live = 0; T.rd = 1; T.go = 0; T.turn = -1; T.board = []; T.rb = []; T.rr = null; T.eq = null; T.sw = null; T.vt = 0; T.clk = 0; T.btn = -1; T.bs = -1; T.msg = 'Tisch geschlossen'; T.bp = null; bc();
 }
 const rec = (p, a, to) => { const H = T.H; if (H) H.ev.push({ ph: H.ph, uid: p.uid, name: p.name, pos: (H.pl.find(q => q.uid == p.uid) || {}).pos, a, to }); };
 const hph = n => { const ph = { 3: 'Flop', 4: 'Turn', 5: 'River' }[n], H = T.H; if (ph && H && H.pots[ph] == null) { H.ph = ph; H.pots[ph] = pot(); } };
@@ -89,8 +127,12 @@ function start() {
   T.pl.filter(q => q.out).forEach(cashout);
   T.pl = T.pl.filter(p => !p.gone); T.pl.sort((a, b) => a.seat - b.seat); T.btn = T.pl.reduce((r, p, i) => p.seat <= T.bs ? i : r, -1);
   T.pl.forEach(p => { p.stack = Math.max(0, p.stack + p.add - (p.sub | 0)); p.add = 0; p.sub = 0; p.h0 = p.stack; p.bcall = 0; p.ghost = p.so ? 1 : 0; p.hole = []; p.show = p.won = p.bet = p.total = p.allin = p.acted = p.vol = p.stx = 0; p.folded = p.stack <= 0 || p.ghost ? 1 : 0; });
-  const act = T.pl.filter(p => !p.folded);
-  if (act.length < 2) { T.live = 0; T.msg = 'Warte auf Spieler …'; return bc(); }
+  let act = T.pl.filter(p => !p.folded);
+  if (act.length < 2) { T.live = 0; T.rd = 1; T.go = 0; T.msg = 'Warte auf Spieler …'; return bc(); } // Pause -> vor der nächsten Hand wieder Bereit-Runde
+  if (T.rd) { // Bereit-Runde: erst wenn alle bereit sind oder ein Bereiter „Trotzdem starten“ drückt (Nicht-Bereite setzen aus)
+    const nr = act.filter(p => !p.rdy); if (nr.length && !T.go) { T.live = 0; T.msg = 'Warte auf Bereit …'; return bc(); }
+    nr.forEach(p => { p.so = p.ghost = p.folded = 1; }); act = act.filter(p => p.rdy); T.rd = T.go = 0; T.pl.forEach(p => p.rdy = 0);
+  }
   T.live = 1; T.board = []; T.deck = sh(); T.msg = ''; T.sd = 1; T.rb = []; T.rr = null; T.rab = null; T.agg = -1; T.ag = -1; T.eq = null; T.run = 0; T.vt = 0; T.clk = 0; T.ro = 0; T.sdp = 0;
   T.btn = nx(T.btn); T.bs = T.pl[T.btn].seat;
   const sb = act.length == 2 ? T.btn : nx(T.btn), bb = nx(sb);
@@ -180,7 +222,7 @@ function runout(R) {
     }
     T.eq = eqs(); ev({ k: 'street', n: T.board.length, pot: pot() }); bc();
     setTimeout(step, f.b.length == 5 ? 2500 : 1800);
-  }; setTimeout(step, 1000);
+  }; ev({ k: 'rit', n: R }); setTimeout(step, 3000); // 3 s Banner, dann Board
 }
 function swEnd() { clearTimeout(T.swt); if (!T.sw) return; T.sw = null; T.eq = eqs(); bc(); setTimeout(T.swNext, 2500); } // alle sehen den River
 function sd(bs) {
@@ -196,10 +238,10 @@ function sd(bs) {
     const t = [...rw].sort((a, b) => b.s - a.s)[0]; res.push([...rw].map(tok).join(' & ') + ' (' + HN[Math.floor(t.s / 759375)] + ')');
   });
   T.rr = R > 1 ? res : null; // Gewinner je Run, bleibt bis zur nächsten Hand
-  done([...W], R > 1 ? res.map((x, i) => 'Run ' + (i + 1) + ': ' + x).join(' · ') : res[0].replace(/^.*\(/, '').replace(')', ''), MW.size == 1 ? [...MW][0] : null);
+  done([...W], R > 1 ? res.map((x, i) => 'Run ' + (i + 1) + ': ' + x).join(' · ') : res[0].replace(/^.*\(/, '').replace(')', ''), MW.size == 1 ? [...MW][0] : null, pots[0].amt);
 }
-function fin() { const w = T.pl.find(p => !p.folded), need = 5 - T.board.length; T.rab = need ? T.deck.slice(-need).reverse() : null; pay([w], T.pl.reduce((a, p) => a + p.total, 0)); done([w], '', w); }
-function done(W, h, tw) { // tw = Train-Sieger (allein Main Pot) oder null (Split = Serie unterbrochen)
+function fin() { const w = T.pl.find(p => !p.folded), need = 5 - T.board.length; T.rab = need ? T.deck.slice(-need).reverse() : null; const t = T.pl.reduce((a, p) => a + p.total, 0); pay([w], t); done([w], '', w, t); }
+function done(W, h, tw, mp) { // tw = Train-Sieger (allein Main Pot) oder null (Split = Serie unterbrochen); mp = Hauptpot
   T.lastW = W.map(p => p.uid);
   T.live = 0; T.turn = -1; T.eq = null; T.run = 0; T.clk = 0; clearTimeout(T.ck); clearTimeout(T.sdt); T.sdp = 0; T.sx = null;
   if (T.seven && W.length == 1 && W[0].hole.map(c => c % 13 + 2).sort((a, b) => a - b).join() == '2,7') { // 7-2-Regel
@@ -218,9 +260,10 @@ function done(W, h, tw) { // tw = Train-Sieger (allein Main Pot) oder null (Spli
   T.msg = W.map(tok).join(' & ') + ' gewinnt' + (h ? ' – ' + h : '');
   T.pl.forEach(q => { if (q.hole.length) { q.hn = (q.hn | 0) + 1; if (q.vol) q.vn = (q.vn | 0) + 1; if (q.won > 0) { q.wst = (q.wst | 0) + 1; q.lst = 0; } else if (q.vol) { q.lst = (q.lst | 0) + 1; q.wst = 0; } q.net = [...(q.net || []), q.stack - q.h0].slice(-10); } }); // NICHT q.ws – das ist der WebSocket
   finH();
-  ev({ k: 'win', w: W.map(p => T.pl.indexOf(p)), a: W.map(p => p.won), msg: rn(T.msg), pot: pot() });
-  // Pleite-Pause: ab 3 Spielern bekommt jeder, der gerade auf 0 gefallen ist, 30 s für Rebuy oder Aussetzen
   const bust = T.pl.filter(q => q.hole.length && q.stack + (q.add | 0) <= 0 && !q.gone && !q.out);
+  ev({ k: 'win', w: W.map(p => T.pl.indexOf(p)), a: W.map(p => p.won), msg: rn(T.msg), pot: pot(), vm: !bust.length && mp >= 50 * T.bb ? 1 : 0 }); // vm: Sieges-Musik nur ab 50 BB Hauptpot und nicht bei einem Kill
+  // Pleite-Pause: ab 3 Spielern bekommt jeder, der gerade auf 0 gefallen ist, 30 s für Rebuy oder Aussetzen
+  bust.forEach(b => W.filter(w => w !== b).forEach(w => { w.kc = (w.kc | 0) + 1; ev({ k: 'kill', i: T.pl.indexOf(w), v: T.pl.indexOf(b), n: w.kc }); })); // Kill-Zähler pro Sitzung am Tisch -> Kill-Sound #1–#5 im Browser
   if (bust.length && T.pl.filter(q => !q.ghost && !q.gone).length > 2) { T.bp = { until: Date.now() + 30000, min: Date.now() + 6000, who: bust.map(q => q.uid) }; T.timer = setTimeout(bpEnd, 30000); }
   else T.timer = setTimeout(start, 6000);
   bc();
@@ -232,36 +275,40 @@ function bpEnd() { // Pause vorbei: wer nicht entschieden hat, wird Geist; dann 
 const bpOk = p => { if (!T.bp) return; T.bp.who = T.bp.who.filter(u => u != p.uid); if (!T.bp.who.length) bpEnd(); };
 function act(p, m) {
   if (!T.live || T.pl.indexOf(p) != T.turn) return;
-  const need = T.cur - p.bet; let a = m.a;
+  const need = T.cur - p.bet; let a = m.a, bet = 0;
   if (a == 'straddle') return; // nach dem Austeilen gesperrt
   if (a == 'fold') p.folded = 1;
   else if (a == 'check') { if (need) return; }
   else if (a == 'call') post(p, need);
   else if (a == 'raise') {
-    const mx = p.bet + p.stack, to = Math.min(Math.round(m.amt / 5) * 5, mx);
-    if (!(to > T.cur) || (to < T.cur + T.last && to < mx)) return; // Min-Raise, außer All-in
-    const z = to - T.cur; if (z >= T.last) { T.last = z; T.pl.forEach(q => q.acted = 0); }
-    T.cur = to; post(p, to - p.bet);
+    const mx = p.bet + p.stack, to = Math.min(Math.round(m.amt / 5) * 5, mx), mn = Math.max(T.cur * 2, T.bb);
+    if (p.acted || !(to > T.cur) || (to < mn && to < mx)) return; // mind. 2x die aktuelle Bet, außer All-in; wer schon gehandelt hat, darf nach kurzem All-in nicht neu raisen
+    if (to >= mn) T.pl.forEach(q => q.acted = 0); // nur ein volles Raise eröffnet die Action neu
+    bet = !T.cur; T.cur = to; post(p, to - p.bet);
     T.agg = T.pl.indexOf(p);
   } else return;
   if (!T.board.length && m.a != 'fold' && m.a != 'check') p.vol = 1; p.acted = 1; T.sd = 0; clearTimeout(T.ck); T.clk = 0; if (p.allin && a != 'fold') a = 'allin';
-  rec(p, a, p.bet); ev({ k: 'a', i: T.pl.indexOf(p), a, to: p.bet, pot: pot() }); nxt();
+  rec(p, a, p.bet); ev({ k: 'a', i: T.pl.indexOf(p), a, b: bet ? 1 : 0, to: p.bet, pot: pot() }); nxt(); // b: erste Bet der Runde -> Ansage „Bet“
 }
 const cents = v => Math.max(0, Math.round((+v || 0) * 20) * 5);
 wss.on('connection', ws => {
-  let p; T.sp.add(ws); bc(); // Zuschauer sehen sofort den Tisch
+  let p; ws.al = 1; ws.on('pong', () => ws.al = 1); T.sp.add(ws); bc(); // Zuschauer sehen sofort den Tisch
   ws.on('message', d => {
     let m; try { m = JSON.parse(d); } catch { return; }
     p = ws.P;
     if (m.t == 'join' && !p && T.pl.length < 9) {
       const uid = m.uid | 0; // Konto = gewählter Hauptname
       if (!T.nm[uid]) return ws.send(JSON.stringify({ t: 'e', k: 'err', m: 'Bitte einen Spieler aus der Liste wählen.' }));
-      if (T.pl.some(q => q.uid == uid)) return ws.send(JSON.stringify({ t: 'e', k: 'err', m: T.nm[uid] + ' sitzt schon am Tisch oder seine letzte Hand läuft noch.' }));
-      const c = Math.max(100, cents(m.buyin));
+      ws.pu = uid; // für die Abfrage beim Session-Ende
+      const old = T.pl.find(q => q.uid == uid); if (old && old.ws.readyState != 1) return rebind(old, ws); // Platz eines Getrennten übernehmen (anderes Gerät)
+      if (old) return ws.send(JSON.stringify({ t: 'e', k: 'err', m: T.nm[uid] + ' sitzt schon am Tisch oder seine letzte Hand läuft noch.' }));
+      const c = T.pl.length ? cents(m.buyin) : Math.max(100, cents(m.buyin)), jm = Math.max(100 * T.bb, ...T.pl.map(chips)); // Späteinsteiger: 40 BB bis Match Stack
+      if (T.pl.length && (c < 40 * T.bb || c > jm)) return ws.send(JSON.stringify({ t: 'e', k: 'err', m: 'Buy-in: mindestens 40 BB (' + (40 * T.bb / 100).toFixed(2) + ' €), höchstens Match Stack (' + (jm / 100).toFixed(2) + ' €).' }));
       if (!T.pl.length) { T.bb = Math.max(5, Math.round(c / 500) * 5); T.seven = m.seven ? cents(m.seven) : 0; } // 100 BB Starting Stack
-      p = { ws, uid, seat: [0, 1, 2, 3, 4, 5, 6, 7, 8].find(k => !T.pl.some(q => q.seat === k)), name: T.nm[uid], stack: c, add: 0, hole: [], bet: 0, total: 0, folded: 1, allin: 0, acted: 0, show: 0, won: 0 };
+      p = { ws, uid, seat: [0, 1, 2, 3, 4, 5, 6, 7, 8].find(k => !T.pl.some(q => q.seat === k)), name: T.nm[uid], pid: /^[0-9a-f]{32}$/.test(m.pid) ? m.pid : '', stack: c, add: 0, hole: [], bet: 0, total: 0, folded: 1, allin: 0, acted: 0, show: 0, won: 0 };
       T.pl.push(p); T.sp.delete(ws); ws.P = p; tx(p, 'Buy-in', c); if (!T.live && !T.bp) { clearTimeout(T.timer); T.timer = setTimeout(start, Math.max(1000, T.lock - Date.now())); } bc();
-    } else if (m.t == 'act' && p) act(p, m);
+    } else if (m.t == 're' && !p) { const q = m.pid && T.pl.find(x => x.pid == m.pid); if (q) rebind(q, ws); } // Reconnect desselben Browsers
+    else if (m.t == 'act' && p) act(p, m);
     else if (m.t == 'arch') ws.send(JSON.stringify({ t: 'e', k: 'archl', l: T.arch.slice(-100).map(h => ({ id: h.id, ts: h.ts, bb: h.bb, res: rn(h.res), pot: h.total, win: (h.win || []).map(nm), c: ((p && h.pl.find(x => x.uid == p.uid)) || {}).hole || null })) }));
     else if (m.t == 'hand') ws.send(JSON.stringify({ t: 'e', k: 'hand', h: hv(m.id | 0, p) }));
     else if (m.t == 'rs' && p && T.sdp) { // Re-Straddle in der 10-s-Phase
@@ -285,8 +332,9 @@ wss.on('connection', ws => {
     else if (m.t == 'emote' && p) ev({ k: 'emote', i: T.pl.indexOf(p), e: m.e | 0 });
     else if (m.t == 'show' && p && !T.live && p.hole.length) { p.show = 1; const L = T.arch[T.arch.length - 1]; if (L && !L.shown.includes(p.seat) && L.pl.some(q => q.uid == p.uid)) L.shown.push(p.seat); bc(); }
     else if (m.t == 'vote' && p && T.vt && !p.folded && p.hole.length) { p.v = [1, 2, 3].includes(m.n) ? m.n : 1; if (T.pl.filter(q => !q.folded && q.hole.length).every(q => q.v)) tally(); else bc(); } // live: alle sehen die Wahl
-    else if (m.t == 'clock' && p && T.live && T.turn >= 0 && !p.folded && p.hole.length && T.pl[T.turn] != p && !T.clk && Date.now() - T.ts >= 120000) { // Call Clock
-      const tg = T.pl[T.turn]; T.clk = Date.now() + 60000; T.ck = setTimeout(() => act(tg, { a: 'fold' }), 60000); bc(); }
+    else if (m.t == 'clock' && p && T.live && T.turn >= 0 && !p.folded && p.hole.length && T.pl[T.turn] != p && !T.clk && Date.now() - T.ts >= 90000) { // Call Clock: ein Mitspieler löst sie aus, frühestens nach 90 s Inaktivität (jede Phase)
+      const tg = T.pl[T.turn], hn = T.hn; T.clk = Date.now() + 60000;
+      T.ck = setTimeout(() => { if (!T.live || T.pl[T.turn] !== tg || T.hn != hn) return; tg.so = 1; send(tg, { t: 'e', k: 'toast', m: 'Call Clock abgelaufen – gefoldet. Du setzt aus, bis du wieder einsteigst.' }); act(tg, { a: 'fold' }); }, 60000); bc(); } // danach Fold + Aussetzen
     else if (m.t == 'rebuy' && p) { // Rebuy: 40–100 BB
       const c = cents(m.amt), mx = rbMax(p);
       if (c <= 0 || c > mx || (c < 40 * T.bb && c !== mx)) return send(p, { t: 'e', k: 'err', m: 'Rebuy: mindestens 40 BB und höchstens bis zum größten Stack (aktuell max. ' + (mx / 100).toFixed(2) + ' €).' });
@@ -301,6 +349,8 @@ wss.on('connection', ws => {
     else if (m.t == 'stay' && p && p.out) { p.out = 0; send(p, { t: 'e', k: 'toast', m: 'Du bleibst am Tisch.' }); bc(); } // Verlassen storniert
     else if (m.t == 'bcall' && p && T.sdp && !p.folded && T.sx.last >= 0 && T.pl[T.sx.last].allin && T.pl.indexOf(p) != T.sx.last) { p.bcall = m.on ? 1 : 0; bc(); } // nur gegen einen All-in-Straddle
     else if (m.t == 'tx' && p) send(p, { t: 'e', k: 'txl', l: T.tx.map(t => ({ ...t, name: nm(t.uid) })), st: Object.fromEntries(T.pl.filter(q => !q.gone && !q.out).map(q => [q.uid, q.stack + (T.live ? q.total : 0) + (q.add | 0) - (q.sub | 0)])) });
+    else if (m.t == 'rdy' && p && T.rd && !T.live) { p.rdy = m.on ? 1 : 0; if (m.on) p.so = p.ghost = 0; // Bereit = auch nicht mehr aussetzen
+      if (m.go && p.rdy && T.pl.filter(q => q.rdy).length >= 2) T.go = 1; kick(); bc(); }
     else if (m.t == 'sitout' && p) { p.so = m.on ? 1 : 0; if (!T.live) p.ghost = p.so; bpOk(p); kick(); bc(); } // Aussetzen / wieder einsteigen: greift ab der nächsten Hand
     else if (m.t == 'train' && p) { // The Train live ändern
       const a = m.amt > 0 ? cents(m.amt) : 0; if (T.live) T.trainNext = a; else { T.train = a; if (!a) T.tr = null; }
@@ -313,20 +363,44 @@ wss.on('connection', ws => {
     else if (m.t == 'av' && p) { // eigenes Profilbild setzen ('' = entfernen); nur kleines JPEG
       const d = m.d === '' ? '' : (String(m.d || '').match(/^data:image\/jpeg;base64,([A-Za-z0-9+/]+={0,2})$/) || [])[1];
       if (d == null || d.length > 60000 || (d && !Buffer.from(d.slice(0, 8), 'base64').subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff])))) return send(p, { t: 'e', k: 'err', m: 'Bild ungültig oder zu groß.' });
-      if (d) L.av[p.uid] = { d, v: Date.now() }; else delete L.av[p.uid]; save(); bc();
+      if (d) L.av[p.uid] = { d, v: Date.now() }; else delete L.av[p.uid]; if (L.md[p.uid]) delete L.md[p.uid].av; save(); bc();
+    }
+    else if (m.t == 'md' && p) { // GIF-Profilbild, Sieges-Musik, Kill-Sounds #1–#5 ('' = entfernen); Länge ≤ 6 s prüft der Browser, abgespielt wird ohnehin max. 6 s
+      const s = ['av', 'w', 'k0', 'k1', 'k2', 'k3', 'k4'].includes(m.s) ? m.s : null; if (!s) return;
+      const D = L.md[p.uid] ??= {}, f = `${MDIR}/${p.uid}-${s}`;
+      if (m.d === '') { delete D[s]; fs.rmSync(f, { force: true }); }
+      else {
+        const x = String(m.d || '').match(/^data:[\w/.+-]*;base64,([A-Za-z0-9+/]+={0,2})$/), b = x && Buffer.from(x[1], 'base64'), t = b && mtype(b);
+        if (!t || b.length > 1048576 || (s == 'av') != (t == 'image/gif')) return send(p, { t: 'e', k: 'err', m: 'Datei ungültig oder zu groß (max. 1 MB · Profilbild: GIF · Sounds: MP3/WAV).' });
+        fs.writeFileSync(f, b); D[s] = { v: Date.now(), m: t }; if (s == 'av') delete L.av[p.uid];
+      }
+      save(); bc();
+    }
+    else if (m.t == 'ssx') { // Session-Ende: P/L ins Dashboard (Discord-Webhook) oder Spaßrunde – entscheidet der erste Teilnehmer, nur einmal
+      const x = L.ss.find(s => s.id == m.id), say = (k, t) => ws.send(JSON.stringify({ t: 'e', k, m: t }));
+      if (!x || x.sx || !x.tx.some(t => t.uid == ws.pu)) return;
+      if (!m.sync) { x.sx = 2; save(); return say('toast', 'Session #' + x.id + ': Spaßrunde – nichts übertragen.'); }
+      if (!HOOK) return say('err', 'Kein Dashboard-Webhook eingerichtet (DISCORD_WEBHOOK fehlt).');
+      x.sx = 1; save(); hook(x).then(() => say('toast', 'Session #' + x.id + ': P/L ins Dashboard übertragen.'), e => { x.sx = 0; save(); say('err', 'Übertragung fehlgeschlagen (' + e.message + ') – im Archiv erneut versuchen.'); });
     }
     else if (m.t == 'addp') { // neuen Hauptnamen dauerhaft anlegen (eindeutig, ohne Groß/Klein)
       const n = String(m.name || '').trim().slice(0, 14);
       if (!n || Object.values(T.nm).some(x => x.toLowerCase() == n.toLowerCase())) return ws.send(JSON.stringify({ t: 'e', k: 'err', m: n ? n + ' gibt es schon.' : 'Bitte einen Namen eingeben.' }));
       T.nm[++T.un] = n; save(); ws.send(JSON.stringify({ t: 'e', k: 'addp', u: T.un })); bc();
     }
+    else if (m.t == 'delp') { // Hauptnamen löschen: nur mit Bestätigungswort, nie wenn er am Tisch sitzt
+      const u = m.u | 0, n = T.nm[u];
+      if (!n) return ws.send(JSON.stringify({ t: 'e', k: 'err', m: 'Spieler nicht gefunden.' }));
+      if (m.c !== 'LÖSCHEN' && m.c !== n) return ws.send(JSON.stringify({ t: 'e', k: 'err', m: 'Bestätigung falsch – tippe LÖSCHEN oder den Namen.' }));
+      if (T.pl.some(q => q.uid == u)) return ws.send(JSON.stringify({ t: 'e', k: 'err', m: n + ' sitzt am Tisch und kann nicht gelöscht werden.' }));
+      L.dn[u] = n; delete T.nm[u]; delete L.av[u]; delete L.md[u]; save(); ws.send(JSON.stringify({ t: 'e', k: 'toast', m: n + ' gelöscht.' })); bc();
+    }
     else if (m.t == 'close' && p) closeTable();
     else if (m.t == 'ss') ws.send(JSON.stringify({ t: 'e', k: 'ssl', l: L.ss.slice(-50).map(s => ({ ...s, tx: s.tx.map(t => ({ ...t, name: nm(t.uid) })) })) })); // Archiv: für alle sichtbar
   });
   ws.on('close', () => {
-    T.sp.delete(ws); p = ws.P; if (!p) return; payout(p); p.gone = 1; p.folded = 1;
-    if (!T.live) { T.pl = T.pl.filter(q => q != p); bpOk(p); return bc(); }
-    if (T.pl.filter(q => !q.folded).length < 2) fin(); else if (T.pl[T.turn] == p) nxt(); else bc();
+    T.sp.delete(ws); p = ws.P; if (!p) return; // Verbindung weg: Platz + Stack bleiben, nur Aussetzen ab der nächsten Hand – folden nur per Call Clock
+    if (!p.so) { p.so = p.dso = 1; if (!T.live) p.ghost = 1; } bpOk(p); bc();
   });
 });
 srv.listen(process.env.PORT || 3000, () => console.log('Poker-Server auf http://localhost:' + (process.env.PORT || 3000)));

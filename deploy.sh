@@ -20,8 +20,8 @@ readonly SCRIPT_DIR
 readonly INTERNAL_PORT=3000          # Port im Container (server.js: process.env.PORT || 3000)
 readonly STATE_FILE_NAME="deploy.env"
 readonly OVERRIDE_FILE_NAME="docker-compose.override.yml"
-readonly APP_ITEMS=(Dockerfile docker-compose.yml package.json server.js index.html cards)
-readonly OPTIONAL_ITEMS=(package-lock.json .env.example)
+readonly APP_ITEMS=(Dockerfile docker-compose.yml package.json package-lock.json server.js index.html cards)
+readonly OPTIONAL_ITEMS=(.env.example update.sh)
 readonly MARK_BEGIN_PREFIX="# >>> deploy.sh:"
 readonly MARK_END_PREFIX="# <<< deploy.sh:"
 
@@ -300,6 +300,11 @@ while true; do
   break
 done
 PROJECT_NAME=$CONTAINER_NAME
+if [[ -n $(prev CONTAINER_NAME) && $(prev CONTAINER_NAME) != "$CONTAINER_NAME" ]]; then
+  warn "Bisher hieß der Container '$(prev CONTAINER_NAME)'. Die Spielerdaten liegen im Volume '$(prev CONTAINER_NAME)_poker-data'."
+  warn "Mit dem neuen Namen entstehen NEUE, LEERE Volumes ('${CONTAINER_NAME}_poker-data'); die alten Daten bleiben unangetastet, werden aber nicht genutzt."
+  confirm "Trotzdem den neuen Namen '$CONTAINER_NAME' verwenden?" || die "Abgebrochen. Starte erneut und behalte den bisherigen Namen."
+fi
 
 while true; do
   ask DOMAIN "Domain, unter der die App erreichbar sein soll (z. B. poker.beispiel.de)" "$(prev DOMAIN)"
@@ -649,6 +654,6 @@ cat <<EOF
   Caddy aktivieren:   ${CADDY_ACTIVATE:-–}
 
   Logs:    docker logs -f $CONTAINER_NAME
-  Update:  git pull im Repository, dann ./deploy.sh erneut ausführen
+  Update:  ./update.sh im Repository (Daten bleiben erhalten, siehe README)
 EOF
 ok "Fertig."
