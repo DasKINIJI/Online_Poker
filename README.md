@@ -26,7 +26,7 @@ Ein selbst gehosteter **Texas-Hold'em-Pokertisch im Browser** für private Runde
 - Eine dauerhafte Spielerliste mit Hauptnamen. Am Tisch lässt sich zusätzlich ein Nickname anzeigen.
 - Buy-in, Rebuy (40 BB bis zum größten Stack am Tisch), Abzug als Korrektur und Cashout. Jede Buchung wird festgehalten.
 - Eine Transaktionsübersicht der laufenden Session und ein Session-Archiv der abgeschlossenen Sessions.
-- Beim Schließen einer Session entscheidet ein Teilnehmer, ob die Gewinne und Verluste per Discord-Webhook ins Dashboard gehen oder ob es eine „Spaßrunde“ ohne Übertragung war (siehe [Konfiguration](#konfiguration)).
+- Beim Schließen einer Session entscheidet ein Teilnehmer, ob die Gewinne und Verluste übertragen werden oder ob es eine „Spaßrunde“ ohne Übertragung war. Ziele sind der Discord-Webhook (Dashboard) und/oder der Poker-Tracker, je nachdem, was eingerichtet ist (siehe [Konfiguration](#konfiguration)). Schlägt ein Ziel fehl, lässt sich die Session im Archiv erneut senden. Ein Ziel, das schon geklappt hat, bekommt sie dabei nicht doppelt.
 - Hauptnamen lassen sich mit einem Bestätigungswort löschen, aber nicht, solange der Spieler am Tisch sitzt. Historie und Gewinne/Verluste bleiben lesbar.
 - Eine Handhistorie mit den letzten Händen.
 - Profilbilder pro Hauptname, als kleines JPEG oder als GIF.
@@ -162,6 +162,8 @@ Erstelle unter GitHub → *Settings → Developer settings → Fine-grained toke
 |---|---|---|
 | Umgebungsvariable `PORT` | Standard `3000` | Port, auf dem `server.js` lauscht. Im Container fest auf 3000 gesetzt. |
 | Umgebungsvariable `DISCORD_WEBHOOK` | leer | Discord-Webhook-URL für den Gewinn-/Verlust-Export einer Session. Leer bedeutet kein Export. **Geheim halten.** |
+| Umgebungsvariable `TRACKER_URL` | leer | Adresse des Poker-Trackers, z. B. `https://tracker.deine-domain.de`. Leer bedeutet keine Übertragung an den Tracker. |
+| Umgebungsvariable `TRACKER_TOKEN` | leer | Token für den Tracker-Import, muss dem `IMPORT_TOKEN` des Trackers entsprechen. **Geheim halten.** |
 | `CONTAINER_NAME` | Standard `online-poker` | Compose-Variable, wird von `deploy.sh` gesetzt |
 | `HOST_PORT` | Standard `3000` | Compose-Variable, Port auf dem Host |
 | `BIND_ADDRESS` | Standard `127.0.0.1` | Compose-Variable, Host-Adresse für den Port |
@@ -169,6 +171,16 @@ Erstelle unter GitHub → *Settings → Developer settings → Fine-grained toke
 | Volume `poker-sounds` → `/app/sounds` | `*.mp3` | Beim Start geladene Sounddateien |
 
 Weitere Umgebungsvariablen nutzt die App nicht.
+
+### Poker-Tracker anbinden
+
+Der Tracker übernimmt eine abgeschlossene Session als fertig abgerechnetes Spiel: jedes Buy-in und jeden Rebuy einzeln, die Auszahlung als Endstand und dazu, wer wem zahlt. Beide Apps bleiben getrennt und sprechen nur über `POST <TRACKER_URL>/api/import` miteinander.
+
+1. Ein Token erzeugen (`openssl rand -hex 32`) und beim Tracker als `IMPORT_TOKEN` setzen. Wie das geht und welche Caddy-Ausnahme nötig ist, steht im README des Trackers.
+2. Hier in der `.env` `TRACKER_URL` und `TRACKER_TOKEN` setzen. `./deploy.sh` fragt beide Werte ab.
+3. Container neu starten. Beim nächsten Session-Ende auf „P/L übertragen“ tippen.
+
+Eine Session mit nur einem Spieler geht nicht an den Tracker, weil es nichts abzurechnen gibt.
 
 ### Discord-Webhook einrichten
 
@@ -255,7 +267,7 @@ index.html           komplette Browser-Oberfläche
 cards/2color, 4color SVG-Kartenvorlagen
 selftest.js          Selbsttest (npm test)
 package-lock.json    feste Version der Abhängigkeit ws
-.env.example         Vorlage für Umgebungsvariablen (DISCORD_WEBHOOK)
+.env.example         Vorlage für Umgebungsvariablen (DISCORD_WEBHOOK, TRACKER_URL, TRACKER_TOKEN)
 start.sh, start.bat  lokaler Start mit Browser-Öffnung
 Dockerfile           Image auf Basis von node:22-alpine
 docker-compose.yml   Container, Port-Bindung, Volumes
