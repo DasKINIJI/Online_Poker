@@ -30,7 +30,15 @@ async function hook(x) { // P/L einer Session in den Discord-Channel (Dashboard)
   x.tx.forEach(t => { const p = P[t.uid] ??= { i: 0, o: 0, n: nm(t.uid) }; if (/^(Buy|Rebuy)/.test(t.type)) p.i += t.amt; else if (t.type == 'Auszahlung') p.o += t.amt; else if (t.type == 'Abzug') p.i -= t.amt; });
   const l = Object.values(P).map(p => `${p.n}: **${e(p.o - p.i)}** (Buy-in ${e(p.i).replace('+', '')})`);
   const r = await fetch(HOOK, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content: `**Session #${x.id}** · ${new Date(x.a).toLocaleString('de-DE')} – ${new Date(x.e).toLocaleTimeString('de-DE')}\n` + l.join('\n'), allowed_mentions: { parse: [] } }) });
-  if (!r.ok) throw new Error('HTTP ' + r.status);
+  if (!r.ok) throw new Error('Discord HTTP ' + r.status);
+}
+const TRK = (process.env.TRACKER_URL || '').replace(/\/+$/, ''), TRK_TOKEN = process.env.TRACKER_TOKEN || ''; // Poker-Tracker (Heimspiel-Abrechnung)
+async function track(x) { // Session als fertiges Spiel an den Poker-Tracker: Buy-ins/Rebuys einzeln, Auszahlung = Endstand (Cent)
+  const P = {};
+  x.tx.forEach(t => { const p = P[t.uid] ??= { name: nm(t.uid), buyins: [], final: 0 }; if (/^(Buy|Rebuy)/.test(t.type)) p.buyins.push(t.amt); else if (t.type == 'Auszahlung') p.final += t.amt; else if (t.type == 'Abzug') p.buyins.push(-t.amt); });
+  const players = Object.values(P); if (players.length < 2) return; // allein am Tisch: nichts abzurechnen
+  const r = await fetch(TRK + '/api/import', { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + TRK_TOKEN }, body: JSON.stringify({ id: 'op' + x.id + '-' + x.a.toString(36), date: new Date(x.a).toLocaleDateString('sv-SE', { timeZone: 'Europe/Berlin' }), players }) });
+  if (!r.ok) throw new Error('Tracker HTTP ' + r.status);
 }
 const mtype = b => { const h = b.subarray(0, 4).toString('latin1'); return h == 'GIF8' ? 'image/gif' : h == 'RIFF' && b.subarray(8, 12).toString('latin1') == 'WAVE' ? 'audio/wav' : h.startsWith('ID3') || (b[0] == 0xff && (b[1] & 0xe0) == 0xe0) ? 'audio/mpeg' : null; }; // Inhalt prüfen, nicht die Endung
 // PWA ohne Extra-Dateien: Manifest, Service Worker (App-Shell + Karten/Sounds cachen, Seite immer zuerst vom Netz) und Icons
@@ -380,8 +388,13 @@ wss.on('connection', ws => {
       const x = L.ss.find(s => s.id == m.id), say = (k, t) => ws.send(JSON.stringify({ t: 'e', k, m: t }));
       if (!x || x.sx || !x.tx.some(t => t.uid == ws.pu)) return;
       if (!m.sync) { x.sx = 2; save(); return say('toast', 'Session #' + x.id + ': Spaßrunde – nichts übertragen.'); }
-      if (!HOOK) return say('err', 'Kein Dashboard-Webhook eingerichtet (DISCORD_WEBHOOK fehlt).');
-      x.sx = 1; save(); hook(x).then(() => say('toast', 'Session #' + x.id + ': P/L ins Dashboard übertragen.'), e => { x.sx = 0; save(); say('err', 'Übertragung fehlgeschlagen (' + e.message + ') – im Archiv erneut versuchen.'); });
+      if (!HOOK && !TRK) return say('err', 'Kein Ziel eingerichtet (DISCORD_WEBHOOK und TRACKER_URL fehlen).');
+      x.sx = 1; save(); // x.dh / x.th: Discord / Tracker schon erledigt -> beim erneuten Versuch nicht doppelt senden
+      Promise.allSettled([HOOK && !x.dh && hook(x).then(() => { x.dh = 1; }), TRK && !x.th && track(x).then(() => { x.th = 1; })]).then(r => {
+        const bad = r.filter(q => q.status == 'rejected').map(q => q.reason.message);
+        if (bad.length) x.sx = 0; save();
+        bad.length ? say('err', 'Übertragung fehlgeschlagen (' + bad.join(', ') + ') – im Archiv erneut versuchen.') : say('toast', 'Session #' + x.id + ': P/L übertragen (' + [HOOK && 'Discord', TRK && 'Tracker'].filter(Boolean).join(' + ') + ').');
+      });
     }
     else if (m.t == 'addp') { // neuen Hauptnamen dauerhaft anlegen (eindeutig, ohne Groß/Klein)
       const n = String(m.name || '').trim().slice(0, 14);
